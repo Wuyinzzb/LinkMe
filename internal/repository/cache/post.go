@@ -21,6 +21,7 @@ type PostCache interface {
 	SetDetail(ctx context.Context, post domain.Post) error                   // 设置一个帖子详情缓存
 	GetPubDetail(ctx context.Context, id int64) (domain.Post, error)         // 根据ID获取一个已发布的帖子详情缓存
 	SetPubDetail(ctx context.Context, post domain.Post) error                // 设置一个已发布的帖子详情缓存
+	DelPubFirstPage(ctx context.Context, id int64) error
 }
 
 type postCache struct {
@@ -107,12 +108,12 @@ func (p *postCache) DelFirstPage(ctx context.Context, id int64) error {
 	key2 := fmt.Sprintf("post:pub:first:%d", id)
 	err := p.cmd.Del(ctx, key1).Err()
 	if err != nil {
-		p.l.Error("delete cache filed", zap.Error(err))
+		p.l.Error("delete cache failed", zap.Error(err))
 		return err
 	}
 	er := p.cmd.Del(ctx, key2).Err()
 	if er != nil {
-		p.l.Error("delete cache filed", zap.Error(er))
+		p.l.Error("delete cache failed", zap.Error(er))
 		return er
 	}
 	return nil

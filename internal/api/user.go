@@ -38,6 +38,8 @@ func NewUserHandler(svc service.UserService, j ijwt.Handler, l *zap.Logger) *Use
 
 func (uh *UserHandler) RegisterRoutes(server *gin.Engine) {
 	userGroup := server.Group("/users")
+	// 使用插件中的泛型函数
+	//userGroup.POST("/signup", WrapBody[SignUpReq](uh.SignUp))
 	userGroup.POST("/signup", WrapBody(uh.SignUp))
 	userGroup.POST("/login", WrapBody(uh.Login))
 	userGroup.POST("/logout", uh.Logout)
@@ -91,7 +93,7 @@ func (uh *UserHandler) SignUp(ctx *gin.Context, req SignUpReq) (Result, error) {
 			Msg:  UserEmailConflictError,
 		}, nil
 	}
-	uh.l.Error("signup filed", zap.Error(err))
+	uh.l.Error("signup failed", zap.Error(err))
 	return Result{
 		Code: UserInternalServerError,
 		Msg:  UserSignUpFailure,
@@ -114,7 +116,7 @@ func (uh *UserHandler) Login(ctx *gin.Context, req LoginReq) (Result, error) {
 			Msg:  UserLoginFailure,
 		}, nil
 	}
-	uh.l.Error("login filed", zap.Error(err))
+	uh.l.Error("login failed", zap.Error(err))
 	return Result{
 		Code: UserInternalServerError,
 	}, err
@@ -124,7 +126,7 @@ func (uh *UserHandler) Login(ctx *gin.Context, req LoginReq) (Result, error) {
 func (uh *UserHandler) Logout(ctx *gin.Context) {
 	// 清除JWT令牌
 	if err := uh.ijwt.ClearToken(ctx); err != nil {
-		uh.l.Error("logout filed", zap.Error(err))
+		uh.l.Error("logout failed", zap.Error(err))
 		ctx.JSON(ServerERROR, gin.H{"error": UserLogoutFailure})
 		return
 	}
