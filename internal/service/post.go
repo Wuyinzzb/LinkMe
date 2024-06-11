@@ -1,10 +1,13 @@
 package service
 
 import (
+	"LinkMe/internal/constants"
 	"LinkMe/internal/domain"
 	"LinkMe/internal/domain/events/post"
 	"LinkMe/internal/repository"
 	"context"
+	"errors"
+	"fmt"
 	"go.uber.org/zap"
 )
 
@@ -22,18 +25,24 @@ type PostService interface {
 }
 
 type postService struct {
-	repo     repository.PostRepository
-	svc      InteractiveService
-	producer post.Producer
-	l        *zap.Logger
+	repo        repository.PostRepository
+	historyRepo repository.HistoryRepository
+	intSvc      InteractiveService
+	checkSvc    CheckService
+	checkRepo   repository.CheckRepository
+	producer    post.Producer
+	l           *zap.Logger
 }
 
-func NewPostService(repo repository.PostRepository, l *zap.Logger, svc InteractiveService, p post.Producer) PostService {
+func NewPostService(repo repository.PostRepository, l *zap.Logger, intSvc InteractiveService, checkSvc CheckService, p post.Producer, historyRepo repository.HistoryRepository, checkRepo repository.CheckRepository) PostService {
 	return &postService{
-		repo:     repo,
-		l:        l,
-		svc:      svc,
-		producer: p,
+		repo:        repo,
+		l:           l,
+		intSvc:      intSvc,
+		checkSvc:    checkSvc,
+		producer:    p,
+		historyRepo: historyRepo,
+		checkRepo:   checkRepo,
 	}
 }
 
@@ -53,14 +62,45 @@ func (p *postService) Update(ctx context.Context, post domain.Post) error {
 	return p.repo.Update(ctx, post)
 }
 
+// Publish 发布帖子到审核
 func (p *postService) Publish(ctx context.Context, post domain.Post) error {
-	post.Status = domain.Published
-	// 公开帖子时执行同步操作,添加帖子到线上库
-	if _, err := p.repo.Sync(ctx, post); err != nil {
-		p.l.Error("db sync failed", zap.Error(err))
-		return err
+	// 检查帖子是否存在
+	po, err := p.checkRepo.FindByID(ctx, post.ID)
+	if err != nil {
+		return fmt.Errorf("无法找到帖子ID为 %d 的帖子: %w", post.ID, err)
 	}
-	return p.repo.UpdateStatus(ctx, post)
+	// 检查帖子状态是否允许重新提交审核
+	if po.Status == constants.PostUnApproved {
+		po.Status = constants.PostUnderReview
+		if err := p.checkRepo.UpdateStatus(ctx, domain.Check{Status: po.Status}); err != nil {
+			p.l.Error("更新审核状态失败", zap.Error(err))
+			return fmt.Errorf("更新审核状态失败: %w", err)
+		}
+	}
+	// 获取帖子详细信息
+	dp, err := p.repo.GetPostById(ctx, post.ID, post.Author.Id)
+	if err != nil {
+		p.l.Error("获取帖子失败", zap.Error(err))
+		return fmt.Errorf("获取帖子失败: %w", err)
+	}
+	// 提交审核
+	check := domain.Check{
+		PostID:  dp.ID,
+		Content: dp.Content,
+		Title:   dp.Title,
+		UserID:  dp.Author.Id,
+	}
+	checkId, err := p.checkSvc.SubmitCheck(ctx, check)
+	if err != nil {
+		p.l.Error("提交审核失败", zap.Error(err))
+		return fmt.Errorf("提交审核失败: %w", err)
+	}
+	// 确保 checkId 有效
+	if checkId == 0 {
+		p.l.Error("提交审核失败，checkId 无效", zap.Int64("postID", post.ID))
+		return errors.New("提交审核失败，checkId 无效")
+	}
+	return nil
 }
 
 func (p *postService) Withdraw(ctx context.Context, post domain.Post) error {
@@ -93,16 +133,20 @@ func (p *postService) GetPostById(ctx context.Context, postId int64, uid int64) 
 
 func (p *postService) GetPublishedPostById(ctx context.Context, postId, uid int64) (domain.Post, error) {
 	dp, err := p.repo.GetPublishedPostById(ctx, postId)
+	if err != nil {
+		return domain.Post{}, err // 直接返回错误
+	}
+	// 存入历史记录
+	if er := p.historyRepo.SetHistory(ctx, dp); er != nil {
+		p.l.Error("set history failed", zap.Error(er))
+	}
+	// 异步处理读取事件
 	go func() {
-		if err == nil {
-			er := p.producer.ProduceReadEvent(post.ReadEvent{
-				PostId: postId,
-				Uid:    uid,
-			})
-			if er != nil {
-				p.l.Error("produce read event failed", zap.Error(er))
-			}
+		// 生成读取事件
+		if er := p.producer.ProduceReadEvent(post.ReadEvent{PostId: postId, Uid: uid}); er != nil {
+			p.l.Error("produce read event failed", zap.Error(er))
 		}
+
 	}()
 	return dp, nil
 }
